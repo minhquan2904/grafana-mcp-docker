@@ -1,0 +1,2 @@
+# Shell scripts and nginx configs break with CRLF; keep LF even on Windows checkouts.
+* text=auto eol=lf

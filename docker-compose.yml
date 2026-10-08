@@ -1,0 +1,82 @@
+# Grafana MCP server behind an nginx auth proxy.
+#
+#   client ──Bearer <client token>──► proxy (nginx, BIND_IP:BIND_PORT)
+#        │  AUTH_MODE=static: token looked up in .secrets/clients.map
+#        │  AUTH_MODE=authz : auth_request to AUTHZ_URL (your SSO gateway)
+#        ▼ allowed: Authorization replaced with the server token
+#   mcp-grafana (no published port) ──► GRAFANA_URL
+#
+# Use ./start.sh, not docker compose directly (it renders .secrets/ first).
+
+name: grafana-mcp
+
+services:
+  mcp-grafana:
+    image: ${MCP_GRAFANA_IMAGE}
+    container_name: mcp-grafana
+    entrypoint: ["/app/mcp-grafana"]
+    command:
+      - --transport
+      - streamable-http
+      - --address
+      - 0.0.0.0:8000
+      - --endpoint-path
+      - /mcp
+      # nginx always sends this Host; nothing else reaches the container.
+      - --allowed-hosts
+      - mcp-grafana:8000,localhost:8000,127.0.0.1:8000
+      # Read-only tools. Delete this line to allow dashboard/alert edits.
+      - --disable-write
+    environment:
+      GRAFANA_URL: ${GRAFANA_URL:?set GRAFANA_URL in .env}
+      GRAFANA_SERVICE_ACCOUNT_TOKEN: ${GRAFANA_SERVICE_ACCOUNT_TOKEN:?set GRAFANA_SERVICE_ACCOUNT_TOKEN in .env}
+      MCP_GRAFANA_SERVER_TOKEN: ${MCP_GRAFANA_SERVER_TOKEN:?run ./start.sh prepare}
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    stop_grace_period: 20s
+    mem_limit: 512m
+    pids_limit: 128
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: 50m
+        max-file: "5"
+
+  proxy:
+    image: ${NGINX_IMAGE}
+    container_name: mcp-grafana-proxy
+    depends_on:
+      - mcp-grafana
+    ports:
+      - "${BIND_IP}:${BIND_PORT}:8080"
+    # Rendered files are mounted as a directory, not one by one: start.sh replaces
+    # them atomically (new inode), which a single-file bind mount would not see.
+    # .secrets/ is 700 on the host; only .secrets/nginx/ is 755 so nginx can read it.
+    volumes:
+      - ./nginx/${AUTH_MODE}.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/proxy-mcp.conf:/etc/nginx/proxy-mcp.conf:ro
+      - ./.secrets/nginx:/etc/nginx/secrets:ro
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx:size=16m
+      - /run:size=1m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # nginx master starts as root, then drops workers to the nginx user.
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+    mem_limit: 128m
+    pids_limit: 64
+    logging: *logging
